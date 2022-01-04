@@ -1,3 +1,3 @@
-name = "pass-mask-gate"
-from pass_mask_gate.config import *
-from pass_mask_gate.gate import MaskGate
+name = "pass"
+from MaskGate.config import *
+from MaskGate.gate import MaskGate
