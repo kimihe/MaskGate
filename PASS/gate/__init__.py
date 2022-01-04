@@ -202,11 +202,11 @@ class MaskGate(nn.Module):
             h_out = h
             w_out = w
             current_mac = b * h_out * w_out * self.hidden_dim
-            cfg.total_mac += current_mac
-            cfg.skipped_mac += current_mac * current_skip_rate
+            m_cfg.total_mac += current_mac
+            m_cfg.skipped_mac += current_mac * current_skip_rate
             # mac_gates = n * h_out * w_out * c_in * 1 * k_h * k_w (n = batch_size, h_out = (h + 2*p - k)/s + 1 = h + 0 - 1 / 1
-            cfg.skipped_patch += current_skip
-            cfg.total_patch += current_total_patch
+            m_cfg.skipped_patch += current_skip
+            m_cfg.total_patch += current_total_patch
 
 
         mask = mask.expand(now_input.shape[0], now_input.shape[1], mask_h, mask_w)

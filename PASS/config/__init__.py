@@ -26,11 +26,11 @@ class RunningMode(Enum):
     Test = 4
 
 
-class Config:
+class MaskConfig:
     total_mac = 0
     skipped_mac = 0
     skipped_patch = 0
     total_patch = 0
 
 
-cfg = Config()
+m_cfg = MaskConfig()
