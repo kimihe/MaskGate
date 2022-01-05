@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-from enum import Enum, unique
+import glob
 
 
 def show_mask(mask, index=1):
@@ -93,17 +93,16 @@ class GumbelSigmoid(torch.nn.Module):
         self.running_mode = None
         self.sigmoid = nn.Sigmoid()
 
-
-    # @staticmethod
-    def normalize_to_one(self, logits):
+    @staticmethod
+    def normalize_to_one(logits):
         logits_max = torch.max(logits)
         logits_min = torch.min(logits)
         gap = logits_max - logits_min
         logits = torch.div(logits - logits_min, gap)
         return logits
 
-    # @staticmethod
-    def sample_gumbel_like(self, template_tensor, eps=1e-10):
+    @staticmethod
+    def sample_gumbel_like(template_tensor, eps=1e-10):
         uniform_samples_tensor = template_tensor.clone().uniform_()
         gumbel_samples_tensor = -torch.log(
             eps - torch.log(uniform_samples_tensor + eps)
@@ -151,15 +150,33 @@ class Residual(nn.Module):
 
 
 class MaskGate(nn.Module):
-    def __init__(self, patch_size, patch_num, input_channel_num, hidden_dim, dim=256, depth=4, kernel_size=9, fc_dim=4096, fc_depth=0):
+    """
+    A Mask Gate generate a Mask to decide which patch can be skipped. Hardware required to accelerate
+    """
+    def __init__(self, patch_size, patch_num, input_channel, output_channel, pretrain_flag=RunningMode.FineTuning, dim=256, depth=4, kernel_size=9, fc_dim=4096, fc_depth=0):
+        """
+        Initialize mask gate.
+        :param patch_size: the size of patch in this layer.
+        :param patch_num: the total number of patches
+        :param input_channel: input channel
+        :param output_channel: output channel of the convolution need acceleration, used to calculate MAC reduction
+        :param pretrain_flag: indicates the running mode, please import RunningMode as well, Default RunningMode.FineTuning
+        :param dim: hyper parameter, namely the input/output channels of inner convolution layer. Default 256
+        :param depth: the depth of the convmixer structure. Default 4
+        :param kernel_size: kernel size of convolutions. Default 9
+        :param fc_dim: fully connected layer input/output channels. Default 4096
+        :param fc_depth: fully connected layer number. Default 0, but two FC layers are already contained
+        """
         super(MaskGate, self).__init__()
         # output should be patch_num * patch_num tensor mask
-        self.hidden_dim = hidden_dim
-        self.input_channel_num = input_channel_num
+        self.vis = False
+        self.pretrain_flag = pretrain_flag
+        self.output_channel = output_channel
+        self.input_channel = 2 * input_channel
         self.patch_num = patch_num
         self.patch_size = patch_size
         self.convmixer = nn.Sequential(
-            nn.Conv2d(self.input_channel_num, dim, kernel_size=patch_size, stride=patch_size),
+            nn.Conv2d(self.input_channel, dim, kernel_size=patch_size, stride=patch_size),
             nn.GELU(),
             nn.BatchNorm2d(dim),
             *[nn.Sequential(Residual(nn.Sequential(nn.Conv2d(dim, dim, kernel_size, groups=dim, padding="same"),
@@ -177,6 +194,12 @@ class MaskGate(nn.Module):
             nn.Linear(fc_dim, self.patch_num)
         )
         self.sigmoid = GumbelSigmoid()
+        if self.pretrain_flag == RunningMode.FineTuning:
+            for name, p in self.named_parameters():
+                if 'Gate' in name:
+                    p.requires_grad = False
+                else:
+                    p.requires_grad = True
 
     def forward(self, now_input, previous_input, mask_mode, running_mode):
         current_input = torch.cat((now_input, previous_input), 1)
@@ -201,7 +224,7 @@ class MaskGate(nn.Module):
             current_skip_rate = current_skip / current_total_patch
             h_out = h
             w_out = w
-            current_mac = b * h_out * w_out * self.hidden_dim
+            current_mac = b * h_out * w_out * self.output_channel
             m_cfg.total_mac += current_mac
             m_cfg.skipped_mac += current_mac * current_skip_rate
             # mac_gates = n * h_out * w_out * c_in * 1 * k_h * k_w (n = batch_size, h_out = (h + 2*p - k)/s + 1 = h + 0 - 1 / 1
@@ -213,17 +236,23 @@ class MaskGate(nn.Module):
 
         m = torch.nn.Upsample(scale_factor=self.patch_size, mode='nearest')
         mask = m(mask)
-        # if cfg.mode == RunningMode.Test:
-        # show_mask(mask.detach())
+        if self.vis:
+            show_mask(mask.detach())
 
-        if mask_mode == MaskMode.Positive:
-            now_input = torch.mul(previous_input, mask) + torch.mul(now_input, 1 - mask)
-        if mask_mode == MaskMode.Negative:
-            now_input = torch.mul(now_input, mask) + torch.mul(previous_input, 1 - mask)
+        # if mask_mode == MaskMode.Positive:
+        #     now_input = torch.mul(previous_input, mask) + torch.mul(now_input, 1 - mask)
+        # if mask_mode == MaskMode.Negative:
+        #     now_input = torch.mul(now_input, mask) + torch.mul(previous_input, 1 - mask)
 
-        return now_input
+        return mask
 
     def init_weights(self):
+        """
+        This function is designed for initializing our mask gate when first constructed
+        in your model. If pretrained model is provided, parameters will be loaded.
+        Freeze mask gate during fine-tuning. If you want to train our mask gate, please
+        do not forget to freeze your backbone during pretraining.
+        """
         for m in self.convmixer.modules():
             if isinstance(m, nn.Conv2d):
                 # nn.init.normal_(m.weight, std=0.001)
@@ -248,3 +277,72 @@ class MaskGate(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, std=0.001)
                 nn.init.constant_(m.bias, 0)
+        self.load_model()
+        if self.pretrain_flag == RunningMode.FineTuning:
+            for p in self.parameters():
+                p.requires_grad = False
+        if self.pretrain_flag == RunningMode.GatePreTrain:
+            for p in self.parameters():
+                p.requires_grad = True
+
+    def save_model(self, epoch=0):
+        """
+        This function is designed to save this gate parameters separately. Only Use this
+        function after pretraining because fine-tuning do not update gate parameters
+        :param epoch: current epoch number, default 0, but we recommend you to assign epoch
+        number to save model in each epoch during one run
+        """
+        file_name = osp.join(m_cfg.model_dir, 'snapshot_{}.pth.tar'.format(str(epoch)))
+        state = {
+            'epoch': epoch,
+            'gate': self.state_dict()
+        }
+        torch.save(state, file_name)
+
+    def load_model(self):
+        """
+        This function is designed to load a pretrained model for mask gate. please put the
+        model .pth.tar file to PASS/output/model_dump/ (snapshot_0.pth.tar for example)
+        the model will be loaded automatically if it contains gate parameter in network state.
+        We recommend you to also establish a similar partial model loading function to your
+        own backbone as you will change the model structure when you insert our module.
+        """
+        ckpt = None
+        try:
+            model_file_list = glob.glob(osp.join(m_cfg.model_dir, '*.pth.tar'))
+            cur_epoch = max(list(
+                [int(file_name[file_name.find('snapshot_') + 9: file_name.find('.pth.tar')]) for file_name in
+                 model_file_list]), default=0)
+            ckpt = torch.load(osp.join(m_cfg.model_dir, 'snapshot_' + str(cur_epoch) + '.pth.tar'))
+        except IOError:
+            if self.pretrain_flag != RunningMode.GatePreTrain and self.pretrain_flag != RunningMode.BackboneTest:
+                assert 0, "Error: No gate available."
+            else:
+                print("Warning: no model loaded, train from start")
+        if ckpt is None:
+            if self.pretrain_flag == RunningMode.GatePreTrain \
+                    or self.pretrain_flag == RunningMode.BackboneTrain\
+                    or self.pretrain_flag == RunningMode.BackboneTest:
+                return
+        if 'gate' in ckpt.keys():
+            try:
+                self.load_state_dict(ckpt['gate'])
+            except RuntimeError:
+                if self.pretrain_flag != RunningMode.GatePreTrain and self.pretrain_flag != RunningMode.BackboneTrain:
+                    assert 0, "Error: Model structure changed, please retrain your mask gate model or delete the wrong model file"
+                else:
+                    print("Warning: model not loaded, train from start")
+        elif 'network' in ckpt.keys():
+            keys = ckpt['network'].keys()
+            is_loaded = False
+            for k, p in self.named_parameters():
+                if k in keys:
+                    p.data = ckpt['network'][k].data
+                    is_loaded = True
+            if not is_loaded:
+                if self.pretrain_flag != RunningMode.GatePreTrain and self.pretrain_flag != RunningMode.BackboneTest:
+                    assert 0, "Error: No gate available, please retrain your mask gate model"
+                else:
+                    print("Warning: no model loaded, train from start")
+    def set_vis(self, vis=True):
+        self.vis = True

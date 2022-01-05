@@ -1,5 +1,7 @@
 from enum import Enum, unique
-
+import os
+import os.path as osp
+import sys
 
 @unique
 class KMMaskScheme(Enum):
@@ -31,6 +33,11 @@ class MaskConfig:
     skipped_mac = 0
     skipped_patch = 0
     total_patch = 0
+    cur_dir = osp.dirname(os.path.abspath(__file__))
+    root_dir = osp.join(cur_dir, '..')
+    output_dir = osp.join(root_dir, 'output')
+    model_dir = osp.join(output_dir, 'model_dump')
+    vis_dir = osp.join(output_dir, 'vis')
 
 
 m_cfg = MaskConfig()
