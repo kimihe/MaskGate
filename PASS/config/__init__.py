@@ -38,6 +38,7 @@ class MaskConfig:
     output_dir = osp.join(root_dir, 'output')
     model_dir = osp.join(output_dir, 'model_dump')
     vis_dir = osp.join(output_dir, 'vis')
+    mask = None
 
 
 m_cfg = MaskConfig()

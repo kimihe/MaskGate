@@ -4,6 +4,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 import glob
+import re
 
 
 def show_mask(mask, index=1):
@@ -74,7 +75,7 @@ class HardSoftmax(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, input):
-        y_hard = input
+        y_hard = input.clone()
         y_hard = y_hard.zero_()
         y_hard[input >= 0.5] = 1
         return y_hard
@@ -93,16 +94,14 @@ class GumbelSigmoid(torch.nn.Module):
         self.running_mode = None
         self.sigmoid = nn.Sigmoid()
 
-    @staticmethod
-    def normalize_to_one(logits):
+    def normalize_to_one(self, logits):
         logits_max = torch.max(logits)
         logits_min = torch.min(logits)
         gap = logits_max - logits_min
         logits = torch.div(logits - logits_min, gap)
         return logits
 
-    @staticmethod
-    def sample_gumbel_like(template_tensor, eps=1e-10):
+    def sample_gumbel_like(self, template_tensor, eps=1e-10):
         uniform_samples_tensor = template_tensor.clone().uniform_()
         gumbel_samples_tensor = -torch.log(
             eps - torch.log(uniform_samples_tensor + eps)
@@ -151,7 +150,7 @@ class Residual(nn.Module):
 
 class MaskGate(nn.Module):
     """
-    A Mask Gate generate a Mask to decide which patch can be skipped. Hardware required to accelerate
+    A Mask Gate generate a Masked x to decide which patch can be skipped. Hardware required to accelerate.
     """
     def __init__(self, patch_size, patch_num, input_channel, output_channel, pretrain_flag=RunningMode.FineTuning, dim=256, depth=4, kernel_size=9, fc_dim=4096, fc_depth=0):
         """
@@ -231,20 +230,21 @@ class MaskGate(nn.Module):
             m_cfg.skipped_patch += current_skip
             m_cfg.total_patch += current_total_patch
 
-
+        if self.vis:
+            m_cfg.mask = mask.clone().detach()
         mask = mask.expand(now_input.shape[0], now_input.shape[1], mask_h, mask_w)
 
         m = torch.nn.Upsample(scale_factor=self.patch_size, mode='nearest')
         mask = m(mask)
-        if self.vis:
-            show_mask(mask.detach())
+        # if self.vis:
+        #     show_mask(mask.detach())
 
-        # if mask_mode == MaskMode.Positive:
-        #     now_input = torch.mul(previous_input, mask) + torch.mul(now_input, 1 - mask)
-        # if mask_mode == MaskMode.Negative:
-        #     now_input = torch.mul(now_input, mask) + torch.mul(previous_input, 1 - mask)
+        if mask_mode == MaskMode.Positive:
+            now_input = torch.mul(previous_input, mask) + torch.mul(now_input, 1 - mask)
+        if mask_mode == MaskMode.Negative:
+            now_input = torch.mul(now_input, mask) + torch.mul(previous_input, 1 - mask)
 
-        return mask
+        return now_input
 
     def init_weights(self):
         """
@@ -277,7 +277,7 @@ class MaskGate(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, std=0.001)
                 nn.init.constant_(m.bias, 0)
-        self.load_model()
+        # self.load_model()
         if self.pretrain_flag == RunningMode.FineTuning:
             for p in self.parameters():
                 p.requires_grad = False
@@ -335,9 +335,16 @@ class MaskGate(nn.Module):
         elif 'network' in ckpt.keys():
             keys = ckpt['network'].keys()
             is_loaded = False
+            parameters = {}
+            for k in keys:
+                if 'Gate' in k:
+                    a = r'Gate\.(.*?)$'
+                    parameter = re.findall(a, k)
+                    if len(parameter)>0:
+                        parameters[parameter[0]]=ckpt['network'][k].data
             for k, p in self.named_parameters():
-                if k in keys:
-                    p.data = ckpt['network'][k].data
+                if k in parameters.keys():
+                    p.data = parameters[k]
                     is_loaded = True
             if not is_loaded:
                 if self.pretrain_flag != RunningMode.GatePreTrain and self.pretrain_flag != RunningMode.BackboneTest:
