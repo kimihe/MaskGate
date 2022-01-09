@@ -14,7 +14,7 @@ class KMMaskScheme(Enum):
 
 @unique
 class MaskMode(Enum):
-    Origin = 0
+    Anchor = 0
     Positive = 1
     Negative = 2
 

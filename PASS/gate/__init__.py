@@ -152,14 +152,14 @@ class MaskGate(nn.Module):
     """
     A Mask Gate generate a Masked x to decide which patch can be skipped. Hardware required to accelerate.
     """
-    def __init__(self, patch_size, patch_num, input_channel, output_channel, pretrain_flag=RunningMode.FineTuning, dim=256, depth=4, kernel_size=9, fc_dim=4096, fc_depth=0):
+    def __init__(self, patch_size, patch_num, input_channel, output_channel, running_mode=RunningMode.FineTuning, dim=256, depth=4, kernel_size=9, fc_dim=4096, fc_depth=0):
         """
         Initialize mask gate.
         :param patch_size: the size of patch in this layer.
         :param patch_num: the total number of patches
         :param input_channel: input channel
         :param output_channel: output channel of the convolution need acceleration, used to calculate MAC reduction
-        :param pretrain_flag: indicates the running mode, please import RunningMode as well, Default RunningMode.FineTuning
+        :param running_mode: indicates the running mode, please import RunningMode as well, Default RunningMode.FineTuning
         :param dim: hyper parameter, namely the input/output channels of inner convolution layer. Default 256
         :param depth: the depth of the convmixer structure. Default 4
         :param kernel_size: kernel size of convolutions. Default 9
@@ -169,7 +169,6 @@ class MaskGate(nn.Module):
         super(MaskGate, self).__init__()
         # output should be patch_num * patch_num tensor mask
         self.vis = False
-        self.pretrain_flag = pretrain_flag
         self.output_channel = output_channel
         self.input_channel = 2 * input_channel
         self.patch_num = patch_num
@@ -193,17 +192,22 @@ class MaskGate(nn.Module):
             nn.Linear(fc_dim, self.patch_num)
         )
         self.sigmoid = GumbelSigmoid()
-        if self.pretrain_flag == RunningMode.FineTuning:
-            for name, p in self.named_parameters():
-                if 'Gate' in name:
-                    p.requires_grad = False
-                else:
-                    p.requires_grad = True
+        self.set_running_mode(running_mode)
 
-    def forward(self, now_input, previous_input, mask_mode, running_mode):
+    def set_running_mode(self, running_mode):
+        self.running_mode = running_mode
+        if self.running_mode == RunningMode.FineTuning:
+            for name, p in self.named_parameters():
+                p.requires_grad = False
+        if self.running_mode == RunningMode.GatePreTrain:
+            for name, p in self.named_parameters():
+                p.requires_grad = True
+
+
+    def forward(self, now_input, previous_input, mask_mode):
         current_input = torch.cat((now_input, previous_input), 1)
         mask = self.convmixer(current_input)
-        mask = self.sigmoid(mask, running_mode)
+        mask = self.sigmoid(mask, self.running_mode)
 
         h, w = now_input.shape[2:]
         b = now_input.shape[0]
