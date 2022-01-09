@@ -39,6 +39,7 @@ class MaskConfig:
     model_dir = osp.join(output_dir, 'model_dump')
     vis_dir = osp.join(output_dir, 'vis')
     mask = None
+    mask_mode = MaskMode.Positive
 
 
 m_cfg = MaskConfig()

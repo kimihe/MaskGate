@@ -204,7 +204,8 @@ class MaskGate(nn.Module):
                 p.requires_grad = True
 
 
-    def forward(self, now_input, previous_input, mask_mode):
+    def forward(self, now_input, previous_input):
+        mask_mode = m_cfg.mask_mode
         current_input = torch.cat((now_input, previous_input), 1)
         mask = self.convmixer(current_input)
         mask = self.sigmoid(mask, self.running_mode)
